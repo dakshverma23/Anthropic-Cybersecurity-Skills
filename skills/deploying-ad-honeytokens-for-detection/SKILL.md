@@ -10,7 +10,8 @@ description: >-
   decoy user accounts with high-privilege attributes, fake SPNs vulnerable to
   Kerberoasting, Group Policy honeypot objects, and SIEM correlation rules for
   Event IDs 4768, 4769, 4776. Mapped to MITRE ATT&CK T1003 (Credential Dumping),
-  T1558 (Kerberoasting), and MITRE D3FEND D3-DUC (Decoy User Credential).
+  T1558 (Kerberoasting), and MITRE D3FEND D3-DUC (Decoy User Credential). Do not use for
+  AdminCount=1, honeyroasting SPN and decoy-GPO cpassword trap patterns — use deploying-active-directory-honeytokens.
 domain: cybersecurity
 subdomain: deception-technology
 tags:
