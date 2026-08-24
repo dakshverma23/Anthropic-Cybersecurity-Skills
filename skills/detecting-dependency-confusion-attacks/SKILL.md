@@ -10,7 +10,8 @@ description: >-
   responding to suspicious install scripts. Covers 2026 attack campaigns including
   Mini Shai-Hulud (170+ npm packages), TanStack compromise, and Microsoft-documented
   reconnaissance payloads. Mapped to MITRE ATT&CK T1195.002 (Compromise Software
-  Dependencies) and NIST CSF supply chain security controls.
+  Dependencies) and NIST CSF supply chain security controls. Do not use for enumerating
+  claimable internal package names with confused or dep-scan — use detecting-dependency-confusion.
 domain: cybersecurity
 subdomain: supply-chain-security
 tags:
