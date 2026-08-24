@@ -99,28 +99,42 @@ def download_npm_package(package_name, version=None):
         return None
 
 def download_pypi_package(package_name, version=None):
-    """Download PyPI package."""
+    """Download PyPI package safely via JSON API (no code execution)."""
+    import urllib.request
+    
     tmpdir = tempfile.mkdtemp()
     
     try:
-        pkg_spec = f"{package_name}=={version}" if version else package_name
-        result = subprocess.run(
-            ['pip', 'download', '--no-deps', pkg_spec, '-d', tmpdir],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
+        # Fetch package metadata from JSON API (safe - no code execution)
+        if version:
+            url = f"https://pypi.org/pypi/{package_name}/{version}/json"
+        else:
+            url = f"https://pypi.org/pypi/{package_name}/json"
         
-        if result.returncode != 0:
-            print(f"Error downloading {pkg_spec}: {result.stderr}", file=sys.stderr)
+        with urllib.request.urlopen(url, timeout=30) as response:
+            data = json.loads(response.read().decode())
+        
+        # Get the sdist URL (source distribution)
+        urls = data.get('urls', [])
+        sdist_url = None
+        
+        for url_info in urls:
+            if url_info.get('packagetype') == 'sdist':
+                sdist_url = url_info.get('url')
+                break
+        
+        if not sdist_url:
+            print(f"No source distribution found for {package_name}", file=sys.stderr)
             return None
         
-        # Extract package (could be .tar.gz or .whl)
-        for file in Path(tmpdir).glob('*'):
-            if file.suffix == '.gz':
-                subprocess.run(['tar', '-xzf', file], cwd=tmpdir, check=True)
-            elif file.suffix == '.whl':
-                subprocess.run(['unzip', '-q', file], cwd=tmpdir, check=True)
+        # Download the tarball directly (safe - no execution)
+        tarball_path = Path(tmpdir) / "package.tar.gz"
+        with urllib.request.urlopen(sdist_url, timeout=30) as response:
+            with open(tarball_path, 'wb') as f:
+                f.write(response.read())
+        
+        # Extract tarball (safe - no setup.py execution)
+        subprocess.run(['tar', '-xzf', tarball_path], cwd=tmpdir, check=True)
         
         # Find extracted directory
         extracted_dirs = [d for d in Path(tmpdir).iterdir() if d.is_dir()]
@@ -361,8 +375,12 @@ def main():
     # Generate report
     exit_code = generate_report(args.package, args.registry, analyzed_findings)
     
-    # Cleanup
-    shutil.rmtree(package_dir.parent, ignore_errors=True)
+    # Cleanup (ensure we're not deleting tmpdir root itself)
+    if package_dir and package_dir.exists():
+        # Remove the temp directory tree safely
+        temp_root = package_dir.parent
+        if temp_root != Path(tempfile.gettempdir()):  # Safety check
+            shutil.rmtree(temp_root, ignore_errors=True)
     
     sys.exit(exit_code)
 

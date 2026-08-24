@@ -50,41 +50,49 @@ npm ci --ignore-scripts  # Ignore install scripts in CI for security
 
 ## PyPI Configuration
 
-### pip.conf (Recommended - Private First)
+### pip.conf (SECURE - Single Index with Proxy)
 ```ini
 # Location: ~/.config/pip/pip.conf (Linux/macOS)
 #           %APPDATA%\pip\pip.ini (Windows)
 
 [global]
-# Private registry FIRST (checked before public)
+# ONLY use private registry that proxies upstream PyPI
+# Configure your private registry (Artifactory/Nexus) to proxy pypi.org
 index-url = https://pypi.yourorg.com/simple
 
-# Public PyPI as fallback
-extra-index-url = https://pypi.org/simple
+# NEVER use extra-index-url - creates dependency confusion vulnerability
+# pip's documentation explicitly warns against extra-index-url for security
 
-# Trusted hosts (if using HTTP registry)
-trusted-host = pypi.yourorg.com
+# Trusted hosts (only if using HTTP registry - not recommended)
+# trusted-host = pypi.yourorg.com
 
 # Timeout settings
 timeout = 60
 
-# Require hashes for verification (high security)
-# require-hashes = true
+# Require hashes for verification (maximum security)
+require-hashes = true
 ```
 
-### pip.conf (Maximum Security - No Fallback)
+**WARNING**: The `extra-index-url` option is **unsafe**. pip checks ALL indexes 
+and selects the highest version across all sources, allowing public packages to 
+override private ones. This is the exact vulnerability this skill detects.
+
+### pip.conf (Alternative - No Public Access)
 ```ini
 [global]
-# ONLY private registry (no public fallback)
+# ONLY private registry (no public PyPI access)
 index-url = https://pypi.yourorg.com/simple
 
-# Disable PyPI entirely
+# Completely disable access to public PyPI
 no-index = false
-# Note: Set no-index = true only if ALL packages in private registry
 
 # Require package hash verification
 require-hashes = true
 ```
+
+**Note**: Your private registry (Artifactory, Nexus, etc.) should be configured 
+to proxy public PyPI, caching packages locally. This gives you a single source of 
+truth while still accessing public packages securely.
 
 ### .pypirc (Publishing Configuration)
 ```ini
@@ -462,10 +470,11 @@ chmod +x .git/hooks/pre-commit
 - [ ] Pre-commit hook blocks unscoped internal package names
 
 ### PyPI
-- [ ] `pip.conf` sets `index-url` to private registry FIRST
-- [ ] `extra-index-url` points to public PyPI as fallback
-- [ ] `requirements.txt` pinned to specific versions
-- [ ] Hash verification enabled for critical projects (`--require-hashes`)
+- [ ] `pip.conf` sets `index-url` to private registry that proxies public PyPI
+- [ ] **NEVER** use `extra-index-url` (creates dependency confusion vulnerability)
+- [ ] Private registry (Artifactory/Nexus) configured to proxy pypi.org
+- [ ] `requirements.txt` pinned to specific versions with hashes
+- [ ] Hash verification enabled (`--require-hashes`)
 - [ ] CI/CD injects `PYPI_TOKEN` securely
 
 ### Maven

