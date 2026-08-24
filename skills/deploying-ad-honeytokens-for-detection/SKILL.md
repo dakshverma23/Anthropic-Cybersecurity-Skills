@@ -89,19 +89,34 @@ mitre_d3fend:
 ### Phase 2: Create Decoy User Accounts
 
 ```powershell
-# Create decoy service account with SPN
+# Create decoy service account with realistic aging
+$RandomPassword = [System.Web.Security.Membership]::GeneratePassword(32, 8)
+$SecurePassword = ConvertTo-SecureString $RandomPassword -AsPlainText -Force
+
 New-ADUser -Name "svc-sql-backup" -SamAccountName "svc-sql-backup" `
            -UserPrincipalName "svc-sql-backup@corp.local" `
            -Description "SQL Server backup service - DO NOT MODIFY" `
-           -Enabled $true -PasswordNeverExpires $true `
-           -AccountPassword (ConvertTo-SecureString "NeverUsedP@ss123!" -AsPlainText -Force) `
+           -Enabled $false -PasswordNeverExpires $true `
+           -AccountPassword $SecurePassword `
            -Path "OU=Service Accounts,DC=corp,DC=local"
 
-# Set SPN (Kerberoasting bait)
+# Set AdminCount=1 (appears privileged without actual privileges)
+Set-ADUser -Identity "svc-sql-backup" -Replace @{adminCount=1}
+
+# Set SPN (Kerberoasting bait) 
 Set-ADUser -Identity "svc-sql-backup" -ServicePrincipalNames @{Add="MSSQLSvc/sql-backup.corp.local:1433"}
 
-# Add to Domain Admins
-Add-ADGroupMember -Identity "Domain Admins" -Members "svc-sql-backup"
+# Add to DECOY group (not real Domain Admins)
+New-ADGroup -Name "Legacy SQL Admins" -GroupScope Universal -GroupCategory Security `
+            -Path "OU=Decoy Groups,DC=corp,DC=local"
+Add-ADGroupMember -Identity "Legacy SQL Admins" -Members "svc-sql-backup"
+
+# Set logon hours to deny all (account appears valuable but cannot actually be used)
+Set-ADUser -Identity "svc-sql-backup" -Replace @{logonHours=@()}
+
+# Clear the password from memory (security)
+$RandomPassword = $null
+$SecurePassword = $null
 ```
 
 **Batch Script** (see `scripts/Deploy-Honeytokens.ps1`).
@@ -170,12 +185,17 @@ $password = ConvertTo-SecureString "NeverUsedP@ss!" -AsPlainText -Force
 
 Create fake permissions that appear in BloodHound graphs:
 
-**Scenario**: Attacker runs BloodHound, sees honeytoken account has GenericAll on Domain Admins group
+**Scenario**: Attacker runs BloodHound, sees honeytoken account has GenericAll on a decoy high-privilege group
 
 ```powershell
-# Grant honeytoken account GenericAll on Domain Admins (NEVER use legitimately)
+# Create decoy "Critical Admins" group (not actual Domain Admins)
+New-ADGroup -Name "Critical Admins" -GroupScope Universal -GroupCategory Security `
+            -Description "Legacy critical system administrators" `
+            -Path "OU=Decoy Groups,DC=corp,DC=local"
+
+# Grant honeytoken account GenericAll on decoy group (safe - no real privileges)
 $Identity = Get-ADUser "svc-sql-backup"
-$Target = Get-ADGroup "Domain Admins"
+$Target = Get-ADGroup "Critical Admins"
 
 $ACL = Get-ACL "AD:$($Target.DistinguishedName)"
 $SID = [System.Security.Principal.SecurityIdentifier]$Identity.SID
@@ -189,16 +209,16 @@ $Rule = New-Object System.DirectoryServices.ActiveDirectoryAccessRule(
 $ACL.AddAccessRule($Rule)
 Set-ACL -Path "AD:$($Target.DistinguishedName)" -AclObject $ACL
 
-Write-Host "✓ Honeytoken svc-sql-backup now has GenericAll on Domain Admins (TRAP SET)"
+Write-Host "✓ Honeytoken svc-sql-backup now has GenericAll on Critical Admins decoy group"
 ```
 
-**Detection**: Monitor Event ID 4662 (object access) for operations on Domain Admins group by honeytoken account.
+**Detection**: Monitor Event ID 4662 (object access) for operations on decoy "Critical Admins" group by honeytoken account.
 
 ```spl
 index=wineventlog sourcetype=WinEventLog:Security EventCode=4662
-ObjectName="CN=Domain Admins,CN=Users,DC=corp,DC=local"
+ObjectName="CN=Critical Admins,CN=Decoy Groups,DC=corp,DC=local"
 SubjectUserName="svc-sql-backup"
-| eval alert="🚨 HONEYTOKEN PRIVILEGE ESCALATION ATTEMPT"
+| eval alert="🚨 HONEYTOKEN ACL ABUSE ATTEMPT"
 ```
 
 ### Phase 7: Monitor for DCSync and Golden Ticket Attacks
@@ -326,9 +346,11 @@ MITRE ATT&CK: T1558.003 (Kerberoasting)
 
 - [ ] Honeytoken accounts created with realistic names (not "test", "decoy", "honey")
 - [ ] SPNs configured on honeytoken accounts (makes them Kerberoastable)
-- [ ] Passwords set to complex values (prevent accidental compromise)
-- [ ] `PasswordNeverExpires` enabled (prevents lockout from failed attempts)
-- [ ] Accounts added to high-privilege groups (Domain Admins, Enterprise Admins)
+- [ ] Long random passwords generated and cleared from memory (prevent compromise)
+- [ ] `PasswordNeverExpires` enabled, `Enabled` set to false (realistic aging, cannot logon)
+- [ ] AdminCount=1 set directly (appears privileged without group membership)
+- [ ] Accounts added to decoy groups (not real privileged groups like Domain Admins)
+- [ ] LogonHours set to deny all access (prevents accidental use)
 - [ ] SIEM rules configured for Event IDs 4768, 4769, 4776, 4624, 4662
 - [ ] Alert severity set to CRITICAL (no false positives expected)
 - [ ] SOC runbook created for honeytoken alert response

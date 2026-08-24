@@ -1,35 +1,10 @@
-<#
-.SYNOPSIS
-    Deploys Active Directory honeytoken accounts for deception-based detection.
-
-.DESCRIPTION
-    Creates decoy user accounts with Service Principal Names (SPNs) to detect
-    Kerberoasting, credential theft, and lateral movement attempts. Honeytokens
-    have no legitimate use; any access triggers high-confidence security alerts.
-
-.PARAMETER Domain
-    Target domain (e.g., corp.local)
-
-.PARAMETER OUPath
-    Organizational Unit path for honeytoken accounts
-
-.PARAMETER AddToDomainAdmins
-    Add honeytokens to Domain Admins group (high visibility)
-
-.PARAMETER Quantity
-    Number of honeytokens to deploy (default: 5)
-
-.EXAMPLE
-    .\Deploy-Honeytokens.ps1 -Domain "corp.local" -OUPath "OU=Service Accounts,DC=corp,DC=local"
-
-.EXAMPLE
-    .\Deploy-Honeytokens.ps1 -AddToDomainAdmins -Quantity 10
-
-.NOTES
-    Author: dakshverma23
-    Version: 1.0
-    Requires: Active Directory PowerShell Module, Domain Admin privileges
-#>
+# Deploy-Honeytokens.ps1 - SECURE Active Directory Honeytokens
+# 
+# Creates decoy accounts with NO REAL PRIVILEGES for detection purposes.
+# Any access to these accounts indicates compromise.
+#
+# SECURITY NOTE: This script creates DISABLED accounts in DECOY groups only.
+# No real privileges are granted to prevent exploitation.
 
 [CmdletBinding()]
 param(
@@ -40,152 +15,63 @@ param(
     [string]$OUPath = "OU=Service Accounts,DC=corp,DC=local",
     
     [Parameter(Mandatory=$false)]
-    [switch]$AddToDomainAdmins,
-    
-    [Parameter(Mandatory=$false)]
     [int]$Quantity = 5
 )
 
 # Import Active Directory module
-Import-Module ActiveDirectory -ErrorAction Stop
-
-# Honeytoken templates
-$HoneytokenTemplates = @(
-    @{
-        NamePrefix = "svc-sql"
-        Suffix = @("backup", "reporting", "etl", "replication", "monitoring")
-        SPNType = "MSSQLSvc"
-        HostPattern = "sql{0}.{1}:1433"
-        Description = "SQL Server {0} service account"
-        Groups = @("Backup Operators")
-    },
-    @{
-        NamePrefix = "svc-vmware"
-        Suffix = @("mgmt", "backup", "vmotion", "ha", "drs")
-        SPNType = "HTTP"
-        HostPattern = "vmware-{0}.{1}"
-        Description = "VMware {0} management service"
-        Groups = @("Server Operators")
-    },
-    @{
-        NamePrefix = "svc-backup"
-        Suffix = @("exec", "agent", "master", "replica", "catalog")
-        SPNType = "BackupExec"
-        HostPattern = "backup-{0}.{1}"
-        Description = "Backup Exec {0} service account"
-        Groups = @("Backup Operators")
-    },
-    @{
-        NamePrefix = "adm"
-        Suffix = @("helpdesk-t2", "tier1-backup", "servicedesk", "desktop-support", "dba-readonly")
-        SPNType = $null
-        HostPattern = $null
-        Description = "{0} administrator account"
-        Groups = @("Account Operators")
-    },
-    @{
-        NamePrefix = "svc-web"
-        Suffix = @("apppool", "iis-worker", "api-backend", "frontend", "cdn")
-        SPNType = "HTTP"
-        HostPattern = "web-{0}.{1}"
-        Description = "Web application {0} service account"
-        Groups = @()
-    }
-)
-
-function Get-SecurePassword {
-    # Generate cryptographically secure password
-    $Length = 24
-    $Chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*"
-    $RNG = New-Object System.Security.Cryptography.RNGCryptoServiceProvider
-    $Bytes = New-Object byte[]($Length)
-    $RNG.GetBytes($Bytes)
-    
-    $Password = -join ($Bytes | ForEach-Object { $Chars[$_ % $Chars.Length] })
-    return $Password
-}
-
-function New-Honeytoken {
-    param(
-        [string]$Name,
-        [string]$SPN,
-        [string]$Description,
-        [string[]]$Groups,
-        [string]$OUPath,
-        [string]$Domain
-    )
-    
-    try {
-        # Check if user already exists
-        $Existing = Get-ADUser -Filter {SamAccountName -eq $Name} -ErrorAction SilentlyContinue
-        if ($Existing) {
-            Write-Warning "User $Name already exists, skipping"
-            return $false
-        }
-        
-        # Generate secure password
-        $Password = Get-SecurePassword
-        $SecurePassword = ConvertTo-SecureString $Password -AsPlainText -Force
-        
-        # Create user
-        New-ADUser -Name $Name `
-                   -SamAccountName $Name `
-                   -UserPrincipalName "$Name@$Domain" `
-                   -Description $Description `
-                   -Enabled $true `
-                   -PasswordNeverExpires $true `
-                   -CannotChangePassword $true `
-                   -AccountPassword $SecurePassword `
-                   -Path $OUPath `
-                   -ErrorAction Stop
-        
-        Write-Host "    ✓ User created: $Name" -ForegroundColor Green
-        
-        # Set SPN if specified
-        if ($SPN) {
-            Set-ADUser -Identity $Name -ServicePrincipalNames @{Add=$SPN} -ErrorAction Stop
-            Write-Host "    ✓ SPN configured: $SPN" -ForegroundColor Green
-        }
-        
-        # Add to groups
-        foreach ($Group in $Groups) {
-            try {
-                Add-ADGroupMember -Identity $Group -Members $Name -ErrorAction Stop
-                Write-Host "    ✓ Added to group: $Group" -ForegroundColor Green
-            } catch {
-                Write-Warning "    Failed to add to group $Group : $_"
-            }
-        }
-        
-        return $true
-        
-    } catch {
-        Write-Error "Failed to create honeytoken $Name : $_"
-        return $false
-    }
-}
-
-# Main execution
-Write-Host "`n═══════════════════════════════════════════" -ForegroundColor Cyan
-Write-Host "   Active Directory Honeytoken Deployment" -ForegroundColor Cyan
-Write-Host "═══════════════════════════════════════════`n" -ForegroundColor Cyan
-
-Write-Host "Configuration:" -ForegroundColor Yellow
-Write-Host "  Domain:               $Domain"
-Write-Host "  OU Path:              $OUPath"
-Write-Host "  Add to Domain Admins: $AddToDomainAdmins"
-Write-Host "  Quantity:             $Quantity`n"
-
-# Validate OU exists
 try {
-    $null = Get-ADOrganizationalUnit -Identity $OUPath -ErrorAction Stop
+    Import-Module ActiveDirectory -ErrorAction Stop
+    Write-Host "[+] Active Directory module loaded" -ForegroundColor Green
 } catch {
-    Write-Error "OU path does not exist: $OUPath"
+    Write-Error "Failed to load Active Directory module: $_"
     exit 1
 }
 
-# Generate honeytokens
-$DeployedCount = 0
+# Secure honeytoken templates (NO REAL PRIVILEGES)
+$HoneytokenTemplates = @(
+    @{
+        NamePrefix = "svc-sql"
+        Suffix = @("backup", "report", "maintenance", "legacy")
+        SPNType = "MSSQLSvc"
+        HostPattern = "{0}-server.{1}"
+        Description = "SQL Server {0} service account - DO NOT MODIFY"
+        DecoyGroups = @("Legacy SQL Admins")
+    },
+    @{
+        NamePrefix = "svc-backup"
+        Suffix = @("exec", "service", "agent", "veeam")
+        SPNType = "BackupExec"
+        HostPattern = "backup-{0}.{1}"
+        Description = "Backup {0} service account"
+        DecoyGroups = @("Archive Operators")
+    },
+    @{
+        NamePrefix = "svc-vmware"
+        Suffix = @("mgmt", "vcenter", "esxi", "view")
+        SPNType = "HTTP"
+        HostPattern = "vmware-{0}.{1}"
+        Description = "VMware {0} service account"
+        DecoyGroups = @("Critical System Admins")
+    },
+    @{
+        NamePrefix = "adm-tier"
+        Suffix = @("1", "2", "helpdesk", "support")
+        SPNType = $null
+        HostPattern = $null
+        Description = "Tier {0} administrative account"
+        DecoyGroups = @("Legacy Admins")
+    },
+    @{
+        NamePrefix = "svc-exchange"
+        Suffix = @("transport", "mailbox", "cas", "legacy")
+        SPNType = "HTTP"
+        HostPattern = "exchange-{0}.{1}"
+        Description = "Exchange {0} service account"
+        DecoyGroups = @("Mail System Operators")
+    }
+)
+
+# Generate honeytokens to create
 $HoneytokensToCreate = @()
 
 for ($i = 0; $i -lt $Quantity; $i++) {
@@ -195,62 +81,161 @@ for ($i = 0; $i -lt $Quantity; $i++) {
     
     $Name = "$($Template.NamePrefix)-$Suffix"
     
-    # Generate SPN if applicable
+    # Generate SPN if applicable (fixed $Host variable bug)
     if ($Template.SPNType) {
-        $Host = $Template.HostPattern -f $Suffix, $Domain
-        $SPN = "$($Template.SPNType)/$Host"
+        $HostName = $Template.HostPattern -f $Suffix, $Domain
+        $SPN = "$($Template.SPNType)/$HostName"
     } else {
         $SPN = $null
     }
     
     $Description = $Template.Description -f $Suffix
     
-    # Add to Domain Admins if switch enabled
-    $Groups = $Template.Groups
-    if ($AddToDomainAdmins) {
-        $Groups += "Domain Admins"
-    }
+    # Use decoy groups only (NO REAL PRIVILEGES)
+    $DecoyGroups = $Template.DecoyGroups
     
     $HoneytokensToCreate += @{
         Name = $Name
         SPN = $SPN
         Description = $Description
-        Groups = $Groups
+        DecoyGroups = $DecoyGroups
     }
 }
 
-Write-Host "Creating $($HoneytokensToCreate.Count) honeytoken(s)...`n" -ForegroundColor Yellow
+# Display deployment plan
+Write-Host ""
+Write-Host "=== SECURE HONEYTOKEN DEPLOYMENT ===" -ForegroundColor Cyan
+Write-Host "Domain: $Domain" -ForegroundColor White
+Write-Host "OU Path: $OUPath" -ForegroundColor White
+Write-Host "Quantity: $Quantity" -ForegroundColor White
+Write-Host "Security: All accounts DISABLED, decoy groups only" -ForegroundColor Green
+Write-Host ""
 
-foreach ($Token in $HoneytokensToCreate) {
-    Write-Host "[*] Deploying: $($Token.Name)" -ForegroundColor Cyan
-    
-    $Success = New-Honeytoken -Name $Token.Name `
-                              -SPN $Token.SPN `
-                              -Description $Token.Description `
-                              -Groups $Token.Groups `
-                              -OUPath $OUPath `
-                              -Domain $Domain
-    
-    if ($Success) {
+# Confirm deployment
+$Confirm = Read-Host "Deploy $Quantity secure honeytokens? (y/N)"
+if ($Confirm -ne "y" -and $Confirm -ne "Y") {
+    Write-Host "Deployment cancelled." -ForegroundColor Yellow
+    exit 0
+}
+
+Write-Host ""
+Write-Host "Deploying honeytokens..." -ForegroundColor Cyan
+Write-Host ""
+
+$DeployedCount = 0
+$FailedCount = 0
+
+foreach ($Honeytoken in $HoneytokensToCreate) {
+    try {
+        Write-Host "[*] Creating: $($Honeytoken.Name)" -ForegroundColor White
+        
+        # Generate cryptographically secure password
+        $RandomPassword = [System.Web.Security.Membership]::GeneratePassword(32, 8)
+        $SecurePassword = ConvertTo-SecureString $RandomPassword -AsPlainText -Force
+        
+        # Create user account (DISABLED for security)
+        New-ADUser -Name $Honeytoken.Name `
+                   -SamAccountName $Honeytoken.Name `
+                   -UserPrincipalName "$($Honeytoken.Name)@$Domain" `
+                   -Description $Honeytoken.Description `
+                   -Enabled $false `
+                   -PasswordNeverExpires $true `
+                   -CannotChangePassword $true `
+                   -AccountPassword $SecurePassword `
+                   -Path $OUPath `
+                   -ErrorAction Stop
+        
+        Write-Host "    [+] Account created (DISABLED)" -ForegroundColor Green
+        
+        # Set AdminCount=1 (appears privileged without group membership)
+        Set-ADUser -Identity $Honeytoken.Name -Replace @{adminCount=1} -ErrorAction Stop
+        Write-Host "    [+] AdminCount=1 set (appears privileged)" -ForegroundColor Green
+        
+        # Deny all logon hours (prevents actual use)
+        Set-ADUser -Identity $Honeytoken.Name -Replace @{logonHours=@()} -ErrorAction Stop
+        Write-Host "    [+] Logon hours denied (prevents use)" -ForegroundColor Green
+        
+        # Set SPN if specified
+        if ($Honeytoken.SPN) {
+            Set-ADUser -Identity $Honeytoken.Name -ServicePrincipalNames @{Add=$Honeytoken.SPN} -ErrorAction Stop
+            Write-Host "    [+] SPN configured: $($Honeytoken.SPN)" -ForegroundColor Green
+        }
+        
+        # Create and add to decoy groups (NO REAL PRIVILEGES)
+        foreach ($DecoyGroup in $Honeytoken.DecoyGroups) {
+            try {
+                # Create decoy group if it doesn't exist
+                $DecoyGroupPath = "OU=Decoy Groups,DC=" + ($Domain -replace '\.', ',DC=')
+                
+                try {
+                    Get-ADGroup -Identity $DecoyGroup -ErrorAction Stop | Out-Null
+                } catch {
+                    New-ADGroup -Name $DecoyGroup -GroupScope Universal -GroupCategory Security `
+                               -Description "DECOY GROUP - NO REAL PRIVILEGES - Used for deception only" `
+                               -Path $DecoyGroupPath -ErrorAction SilentlyContinue
+                }
+                
+                # Add to decoy group
+                Add-ADGroupMember -Identity $DecoyGroup -Members $Honeytoken.Name -ErrorAction SilentlyContinue
+                Write-Host "    [+] Added to DECOY group: $DecoyGroup" -ForegroundColor Green
+                
+            } catch {
+                Write-Host "    [!] Decoy group warning: $_" -ForegroundColor Yellow
+            }
+        }
+        
+        # Clear password from memory for security
+        $RandomPassword = $null
+        $SecurePassword = $null
+        
         $DeployedCount++
+        Write-Host ""
+        
+    } catch {
+        Write-Host "    [-] Error creating $($Honeytoken.Name): $_" -ForegroundColor Red
+        $FailedCount++
+        Write-Host ""
+    }
+}
+
+# Deployment summary
+Write-Host "======================================" -ForegroundColor Cyan
+Write-Host "DEPLOYMENT COMPLETE" -ForegroundColor Green
+Write-Host "======================================" -ForegroundColor Cyan
+Write-Host "Successfully deployed: $DeployedCount" -ForegroundColor Green
+Write-Host "Failed: $FailedCount" -ForegroundColor Red
+Write-Host ""
+Write-Host "SECURITY STATUS:" -ForegroundColor Yellow
+Write-Host "- All accounts are DISABLED" -ForegroundColor Yellow
+Write-Host "- All accounts have logon hours DENIED" -ForegroundColor Yellow
+Write-Host "- All accounts are in DECOY groups only" -ForegroundColor Yellow
+Write-Host "- No real privileges granted" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "Configure SIEM monitoring for Event IDs:" -ForegroundColor White
+Write-Host "- 4768 (TGT Request)" -ForegroundColor White
+Write-Host "- 4769 (TGS Request / Kerberoasting)" -ForegroundColor White
+Write-Host "- 4776 (NTLM Authentication)" -ForegroundColor White
+Write-Host "- 4624 (Successful Logon)" -ForegroundColor White
+Write-Host "======================================" -ForegroundColor Cyan
+
+# List deployed honeytokens for reference
+if ($DeployedCount -gt 0) {
+    Write-Host ""
+    Write-Host "DEPLOYED HONEYTOKENS:" -ForegroundColor Cyan
+    
+    foreach ($Honeytoken in $HoneytokensToCreate) {
+        if (Get-ADUser -Identity $Honeytoken.Name -ErrorAction SilentlyContinue) {
+            Write-Host "- $($Honeytoken.Name)" -ForegroundColor White
+            if ($Honeytoken.SPN) {
+                Write-Host "  SPN: $($Honeytoken.SPN)" -ForegroundColor Gray
+            }
+            Write-Host "  Groups: $($Honeytoken.DecoyGroups -join ', ')" -ForegroundColor Gray
+        }
     }
     
     Write-Host ""
+    Write-Host "Save this list for SIEM monitoring configuration." -ForegroundColor Yellow
 }
 
-# Summary
-Write-Host "═══════════════════════════════════════════" -ForegroundColor Cyan
-Write-Host "   Deployment Summary" -ForegroundColor Cyan
-Write-Host "═══════════════════════════════════════════" -ForegroundColor Cyan
-Write-Host "Successfully deployed: $DeployedCount/$($HoneytokensToCreate.Count) honeytokens" -ForegroundColor Green
-
-if ($DeployedCount -gt 0) {
-    Write-Host "`n⚠️  NEXT STEPS:" -ForegroundColor Yellow
-    Write-Host "  1. Configure SIEM alerting for Event IDs 4768, 4769, 4776, 4624"
-    Write-Host "  2. Test detection with Rubeus or Impacket GetUserSPNs.py"
-    Write-Host "  3. Document honeytoken account list (restricted access)"
-    Write-Host "  4. Schedule monthly verification audit"
-    Write-Host "  5. Update SOC runbook with honeytoken response procedures`n"
-}
-
-Write-Host "═══════════════════════════════════════════`n" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Deployment script completed successfully." -ForegroundColor Green

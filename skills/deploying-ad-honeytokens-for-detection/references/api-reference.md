@@ -2,21 +2,35 @@
 
 ## Active Directory Honeytoken Management
 
-### Create Honeytoken User Account
+### Create Secure Honeytoken User Account
 ```powershell
-# Basic honeytoken creation
+# Generate cryptographically secure random password
+$RandomPassword = [System.Web.Security.Membership]::GeneratePassword(32, 8)
+$SecurePassword = ConvertTo-SecureString $RandomPassword -AsPlainText -Force
+
+# Basic honeytoken creation (SECURE - no real privileges)
 New-ADUser -Name "svc-backup-sql" `
            -SamAccountName "svc-backup-sql" `
            -UserPrincipalName "svc-backup-sql@corp.local" `
            -Description "SQL Server backup service account" `
-           -Enabled $true `
+           -Enabled $false `
            -PasswordNeverExpires $true `
            -CannotChangePassword $true `
-           -AccountPassword (ConvertTo-SecureString "P@ssw0rd$(Get-Random -Minimum 1000 -Maximum 9999)!" -AsPlainText -Force) `
+           -AccountPassword $SecurePassword `
            -Path "OU=Service Accounts,DC=corp,DC=local"
 
+# Set AdminCount=1 (appears privileged without actual group membership)
+Set-ADUser -Identity "svc-backup-sql" -Replace @{adminCount=1}
+
+# Set logon hours to deny all (cannot actually be used)
+Set-ADUser -Identity "svc-backup-sql" -Replace @{logonHours=@()}
+
+# Clear password from memory for security
+$RandomPassword = $null
+$SecurePassword = $null
+
 # Verify creation
-Get-ADUser -Identity "svc-backup-sql" -Properties *
+Get-ADUser -Identity "svc-backup-sql" -Properties AdminCount, LogonHours, Enabled
 ```
 
 ### Configure Service Principal Name (SPN)
@@ -31,27 +45,43 @@ Get-ADUser -Identity "svc-backup-sql" -Properties ServicePrincipalNames | Select
 Get-ADUser -Filter {ServicePrincipalName -like "*"} -Properties ServicePrincipalNames | Select SamAccountName, ServicePrincipalNames
 ```
 
-### Add to High-Privilege Groups
+### Add to Decoy Groups (SAFE APPROACH)
 ```powershell
-# Add honeytoken to Domain Admins (NEVER use legitimately)
-Add-ADGroupMember -Identity "Domain Admins" -Members "svc-backup-sql"
+# Create decoy group (NO ACTUAL PRIVILEGES)
+New-ADGroup -Name "Legacy SQL Admins" -GroupScope Universal -GroupCategory Security `
+            -Description "Legacy SQL Server administrators" `
+            -Path "OU=Decoy Groups,DC=corp,DC=local"
+
+# Add honeytoken to decoy group (appears privileged, grants nothing)
+Add-ADGroupMember -Identity "Legacy SQL Admins" -Members "svc-backup-sql"
 
 # Verify membership
-Get-ADGroupMember -Identity "Domain Admins" | Where-Object {$_.SamAccountName -eq "svc-backup-sql"}
+Get-ADGroupMember -Identity "Legacy SQL Admins" | Where-Object {$_.SamAccountName -eq "svc-backup-sql"}
 
-# Add to multiple groups
-$Groups = @("Domain Admins", "Schema Admins", "Backup Operators")
-foreach ($Group in $Groups) {
-    Add-ADGroupMember -Identity $Group -Members "svc-backup-sql"
-    Write-Host "Added to $Group"
+# Create multiple decoy groups for realism
+$DecoyGroups = @("Legacy SQL Admins", "Archive Operators", "Critical Service Accounts")
+foreach ($Group in $DecoyGroups) {
+    try {
+        New-ADGroup -Name $Group -GroupScope Universal -GroupCategory Security `
+                    -Description "Decoy group for deception - NO REAL PRIVILEGES" `
+                    -Path "OU=Decoy Groups,DC=corp,DC=local"
+        Write-Host "Created decoy group: $Group"
+    } catch {
+        Write-Host "Group $Group already exists"
+    }
 }
 ```
 
-### Set ACL Honeypot (Fake Permissions)
+### Set Decoy ACL Permissions (SAFE APPROACH)
 ```powershell
-# Grant honeytoken GenericAll on Domain Admins group
+# Create decoy high-privilege group (NOT Domain Admins)
+New-ADGroup -Name "Critical System Admins" -GroupScope Universal -GroupCategory Security `
+            -Description "Decoy critical administrators group" `
+            -Path "OU=Decoy Groups,DC=corp,DC=local"
+
+# Grant honeytoken GenericAll on DECOY group (safe - no real privileges)
 $Identity = Get-ADUser "svc-backup-sql"
-$Target = Get-ADGroup "Domain Admins"
+$Target = Get-ADGroup "Critical System Admins"
 
 $ACL = Get-ACL "AD:$($Target.DistinguishedName)"
 $SID = [System.Security.Principal.SecurityIdentifier]$Identity.SID
@@ -65,13 +95,13 @@ $Rule = New-Object System.DirectoryServices.ActiveDirectoryAccessRule(
 $ACL.AddAccessRule($Rule)
 Set-ACL -Path "AD:$($Target.DistinguishedName)" -AclObject $ACL
 
-Write-Host "✓ Honeytoken has GenericAll on Domain Admins (BloodHound will show this)"
+Write-Host "✓ Honeytoken has GenericAll on decoy group (BloodHound will show attractive path)"
 ```
 
-### Batch Deployment Script
+### Secure Batch Deployment Script
 ```powershell
-# deploy_honeytokens.ps1
-# Deploys multiple honeytokens with varying characteristics
+# secure_deploy_honeytokens.ps1
+# Deploys multiple honeytokens with NO REAL PRIVILEGES
 
 param(
     [string]$Domain = "corp.local",
@@ -83,37 +113,23 @@ $Honeytokens = @(
         Name = "svc-sql-backup"
         SPN = "MSSQLSvc/sql-backup.corp.local:1433"
         Description = "SQL Server backup service account - DO NOT MODIFY"
-        Groups = @("Backup Operators")
+        DecoyGroups = @("Legacy SQL Admins")
     },
     @{
         Name = "svc-vmware-mgmt"
         SPN = "HTTP/vmware-mgmt.corp.local"
         Description = "VMware vCenter management service"
-        Groups = @("Domain Admins")
-    },
-    @{
-        Name = "svc-backup-exec"
-        SPN = "BackupExec/backup.corp.local"
-        Description = "Backup Exec enterprise backup service"
-        Groups = @("Backup Operators")
+        DecoyGroups = @("Critical System Admins")
     },
     @{
         Name = "adm-helpdesk-t2"
         SPN = $null
         Description = "Tier 2 helpdesk administrator account"
-        Groups = @("Account Operators")
-    },
-    @{
-        Name = "sqlserver-readonly"
-        SPN = "MSSQLSvc/sqlserver-ro.corp.local:1433"
-        Description = "SQL Server read-only reporting service"
-        Groups = @()
+        DecoyGroups = @("Archive Operators")
     }
 )
 
-Write-Host "Deploying honeytokens..." -ForegroundColor Cyan
-Write-Host "Domain: $Domain" -ForegroundColor Cyan
-Write-Host "OU Path: $OUPath`n" -ForegroundColor Cyan
+Write-Host "Deploying SECURE honeytokens (NO REAL PRIVILEGES)..." -ForegroundColor Cyan
 
 $DeployedCount = 0
 
@@ -121,22 +137,29 @@ foreach ($Token in $Honeytokens) {
     try {
         Write-Host "[*] Creating: $($Token.Name)"
         
-        # Generate secure random password
-        $Password = "Honeytoken$(Get-Random -Minimum 10000 -Maximum 99999)!@#"
+        # Generate cryptographically secure password
+        $RandomPassword = [System.Web.Security.Membership]::GeneratePassword(32, 8)
+        $SecurePassword = ConvertTo-SecureString $RandomPassword -AsPlainText -Force
         
-        # Create user
+        # Create user (DISABLED by default for security)
         New-ADUser -Name $Token.Name `
                    -SamAccountName $Token.Name `
                    -UserPrincipalName "$($Token.Name)@$Domain" `
                    -Description $Token.Description `
-                   -Enabled $true `
+                   -Enabled $false `
                    -PasswordNeverExpires $true `
                    -CannotChangePassword $true `
-                   -AccountPassword (ConvertTo-SecureString $Password -AsPlainText -Force) `
+                   -AccountPassword $SecurePassword `
                    -Path $OUPath `
                    -ErrorAction Stop
         
-        Write-Host "    ✓ User created" -ForegroundColor Green
+        # Set AdminCount=1 (appears privileged)
+        Set-ADUser -Identity $Token.Name -Replace @{adminCount=1}
+        
+        # Deny all logon hours (prevents actual use)
+        Set-ADUser -Identity $Token.Name -Replace @{logonHours=@()}
+        
+        Write-Host "    ✓ Secure user created (disabled, admin-looking)" -ForegroundColor Green
         
         # Set SPN if specified
         if ($Token.SPN) {
@@ -144,11 +167,25 @@ foreach ($Token in $Honeytokens) {
             Write-Host "    ✓ SPN configured: $($Token.SPN)" -ForegroundColor Green
         }
         
-        # Add to groups
-        foreach ($Group in $Token.Groups) {
-            Add-ADGroupMember -Identity $Group -Members $Token.Name -ErrorAction SilentlyContinue
-            Write-Host "    ✓ Added to group: $Group" -ForegroundColor Green
+        # Add to DECOY groups only (no real privileges)
+        foreach ($DecoyGroup in $Token.DecoyGroups) {
+            try {
+                # Create decoy group if it doesn't exist
+                New-ADGroup -Name $DecoyGroup -GroupScope Universal -GroupCategory Security `
+                           -Description "Decoy group - NO REAL PRIVILEGES" `
+                           -Path "OU=Decoy Groups,DC=corp,DC=local" `
+                           -ErrorAction SilentlyContinue
+                
+                Add-ADGroupMember -Identity $DecoyGroup -Members $Token.Name -ErrorAction SilentlyContinue
+                Write-Host "    ✓ Added to DECOY group: $DecoyGroup" -ForegroundColor Green
+            } catch {
+                Write-Host "    ⚠ Decoy group issue: $_" -ForegroundColor Yellow
+            }
         }
+        
+        # Clear password from memory
+        $RandomPassword = $null
+        $SecurePassword = $null
         
         $DeployedCount++
         Write-Host ""
@@ -160,8 +197,9 @@ foreach ($Token in $Honeytokens) {
 }
 
 Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
-Write-Host "Deployment Complete!" -ForegroundColor Green
+Write-Host "SECURE Deployment Complete!" -ForegroundColor Green
 Write-Host "Successfully deployed: $DeployedCount/$($Honeytokens.Count) honeytokens" -ForegroundColor Green
+Write-Host "⚠️  All accounts DISABLED and in DECOY groups only" -ForegroundColor Yellow
 Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
 ```
 
