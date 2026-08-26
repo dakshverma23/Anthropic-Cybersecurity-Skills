@@ -36,7 +36,7 @@ mitre_attack:
 - T1003
 - T1558
 - T1558.003
-mitre_d3fend:
+d3fend_techniques:
 - D3-DUC
 - D3-DACH
 ---

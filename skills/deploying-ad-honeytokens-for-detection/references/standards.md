@@ -66,7 +66,7 @@ Event 4769:
 **Tactic**: Discovery  
 **Sub-Technique**: T1069.002 (Domain Groups)
 
-**Detection**: Honeytoken membership in Domain Admins/Enterprise Admins discovered via `net group "Domain Admins" /domain` or BloodHound
+**Detection**: Honeytoken membership in decoy groups discovered via `net group` commands or BloodHound (appears as high-privilege path without actual privileges)
 
 ---
 
@@ -82,7 +82,7 @@ Event 4769:
 **Defensive Technique**: Deceive  
 **Description**: A credential that is created for the purposes of deceiving an adversary
 
-**Implementation**: Honeytokens deployed as Active Directory user accounts with SPNs and high-privilege group memberships
+**Implementation**: Honeytokens deployed as Active Directory user accounts with SPNs, AdminCount=1 set directly, and membership in decoy groups (not real privileged groups)
 
 **Detection Analytics**:
 - Authentication attempts using decoy credentials (Event 4768, 4776)
@@ -99,7 +99,7 @@ Event 4769:
 **Defensive Technique**: Deceive  
 **Description**: Accounts created for the purpose of deceiving adversaries; designed to be discovered during reconnaissance
 
-**Implementation**: Honeytoken accounts placed in Service Accounts OU, added to Domain Admins group, assigned enticing descriptions
+**Implementation**: Honeytoken accounts placed in Service Accounts OU, AdminCount=1 set directly, assigned enticing descriptions, added to decoy groups with names suggesting privileges
 
 **Detection Coverage**:
 - Account enumeration (BloodHound, PowerView, AdFind)

@@ -27,6 +27,22 @@ try {
     exit 1
 }
 
+# Function to generate cryptographically secure random password
+function New-SecurePassword {
+    param([int]$Length = 32)
+    
+    # Use .NET cryptographic RNG (works on both PowerShell 5.1 and 7+)
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    $bytes = New-Object byte[] 32
+    $rng.GetBytes($bytes)
+    
+    # Convert to base64 and trim to desired length
+    $password = [Convert]::ToBase64String($bytes).Substring(0, $Length)
+    $rng.Dispose()
+    
+    return $password
+}
+
 # Secure honeytoken templates (NO REAL PRIVILEGES)
 $HoneytokenTemplates = @(
     @{
@@ -129,8 +145,8 @@ foreach ($Honeytoken in $HoneytokensToCreate) {
     try {
         Write-Host "[*] Creating: $($Honeytoken.Name)" -ForegroundColor White
         
-        # Generate cryptographically secure password
-        $RandomPassword = [System.Web.Security.Membership]::GeneratePassword(32, 8)
+        # Generate cryptographically secure password (works on PS 5.1 and 7+)
+        $RandomPassword = New-SecurePassword -Length 32
         $SecurePassword = ConvertTo-SecureString $RandomPassword -AsPlainText -Force
         
         # Create user account (DISABLED for security)
